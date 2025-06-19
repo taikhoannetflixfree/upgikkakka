@@ -1,0 +1,258 @@
+name: Codespace Auto-Run
+on:
+  workflow_dispatch:
+    inputs:
+      part:
+        description: 'Part number (01, 02, etc.)'
+        required: false
+        default: '01'
+  push:
+    branches:
+      - main
+      - develop
+jobs:
+  auto-run:
+    runs-on: ubuntu-latest
+    steps:
+      # Step 0: Setup environment and display start time
+      - name: Display Start Time
+        run: |
+          echo "=== GitHub Codespace Auto-Run Script ==="
+          echo "Start time: $(date)"
+          echo "Running part: ${{ github.event.inputs.part || '01' }}"
+      
+      # Step 1: Install required tools
+      - name: Install Required Packages
+        run: |
+          echo "[1/6] Installing required packages..."
+          sudo apt-get update -y
+          sudo apt-get install -y stress curl git jq
+      
+      # Step 2: Install GitHub CLI if not present
+      - name: Install GitHub CLI
+        run: |
+          echo "[2/6] Installing GitHub CLI..."
+          if ! command -v gh &> /dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | \
+              sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] \
+              https://cli.github.com/packages stable main" | \
+              sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt update -y
+            sudo apt install gh -y
+          fi
+      
+      # Step 3: Verify GitHub CLI Authentication
+      - name: Verify GitHub CLI Authentication
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "[3/6] Verifying GitHub CLI authentication..."
+          if [ -z "$GH_TOKEN" ]; then
+            echo "Error: GH_TOKEN is not set or empty"
+            exit 1
+          fi
+          echo "Token length: ${#GH_TOKEN}"
+          echo "Testing authentication with gh auth status..."
+          gh auth status
+      
+      # Step 4: Get and Check First Codespace - UPDATED WITH DOCKER IMAGES CHECK
+      - name: Check First Codespace
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          echo "[4/6] Getting first available codespace..."
+          echo "Using GH_TOKEN for authentication..."
+          echo "Listing codespaces..."
+          
+          # Try to get codespace list with error handling
+          CODESPACE_LIST_OUTPUT=$(gh cs list --json name 2>&1)
+          CODESPACE_LIST_EXIT_CODE=$?
+          
+          if [ $CODESPACE_LIST_EXIT_CODE -ne 0 ]; then
+            echo "Warning: Failed to list codespaces (exit code: $CODESPACE_LIST_EXIT_CODE)"
+            echo "Error output: $CODESPACE_LIST_OUTPUT"
+            echo "This might be due to GitHub API issues (HTTP 503, rate limits, etc.)"
+            echo "Continuing with workflow execution..."
+          else
+            CODESPACE_NAME=$(echo "$CODESPACE_LIST_OUTPUT" | jq -r '.[0].name // empty' 2>/dev/null)
+            
+            if [ -n "$CODESPACE_NAME" ] && [ "$CODESPACE_NAME" != "null" ] && [ "$CODESPACE_NAME" != "" ]; then
+              echo "Found codespace: $CODESPACE_NAME"
+              
+              # Try to view codespace details
+              if gh cs view -c "$CODESPACE_NAME" 2>/dev/null; then
+                echo "Codespace details retrieved successfully"
+              else
+                echo "Warning: Could not retrieve codespace details, but continuing..."
+              fi
+              
+              echo "Attempting to connect to codespace via SSH and run commands..."
+              
+              # Check if any Docker images are running
+              DOCKER_CHECK_CMD='
+              echo "Checking if any Docker containers are running..."
+              
+              # Check if Docker daemon is running
+              if ! docker info >/dev/null 2>&1; then
+                echo "Docker daemon is not running or not accessible"
+                DOCKER_RUNNING=false
+              else
+                echo "Docker daemon is accessible"
+                
+                # List all running containers
+                RUNNING_CONTAINERS=$(docker ps -q)
+                
+                if [ -z "$RUNNING_CONTAINERS" ]; then
+                  echo "No Docker containers are currently running"
+                  DOCKER_RUNNING=false
+                else
+                  echo "Found running Docker containers:"
+                  docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+                  DOCKER_RUNNING=true
+                fi
+              fi
+              
+              # Navigate to workspace and run commands
+              echo "Current directory: $(pwd)"
+              echo "User: $(whoami)"
+              echo "Disk usage:"
+              df -h
+              
+              # Switch to root if needed
+              sudo su -c "echo Root access confirmed"
+              
+              # Navigate to the target directory
+              cd /workspaces/huhuioio || { echo "Failed to navigate to /workspaces/huhuioio"; exit 1; }
+              echo "Successfully navigated to: $(pwd)"
+              
+              # Only run docker-script.sh up if no containers are running
+              if [ "$DOCKER_RUNNING" = false ]; then
+                echo "No Docker containers running - Starting docker-script.sh up..."
+                if [ -f "./docker-script.sh" ]; then
+                  chmod +x ./docker-script.sh
+                  ./docker-script.sh up
+                else
+                  echo "Warning: docker-script.sh not found in current directory"
+                  ls -la
+                fi
+              else
+                echo "Docker containers are already running - Skipping docker-script.sh up"
+                echo "Current running containers:"
+                docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+              fi
+              '
+              
+              if gh cs ssh -c "$CODESPACE_NAME" -- "$DOCKER_CHECK_CMD" 2>/dev/null; then
+                echo "Successfully executed commands in codespace"
+              else
+                echo "Warning: Failed to execute commands in codespace, but continuing..."
+              fi
+              
+              echo "Sleeping for 180 seconds..."
+              sleep 180
+              echo "Sleep completed"
+            else
+              echo "No codespaces found or accessible"
+              echo "Available codespaces output: $CODESPACE_LIST_OUTPUT"
+              echo "Continuing with workflow execution..."
+            fi
+          fi
+          
+          echo "Codespace check step completed (continuing regardless of issues)"
+      
+      # Step 5: Get ngrok endpoint URL
+      - name: Get ngrok Endpoint URL
+        continue-on-error: true
+        env:
+          NGROK_API_TOKEN: ${{ secrets.NGROK_API_TOKEN }}
+        run: |
+          echo "[5/6] Getting ngrok endpoint URL..."
+          if [ -z "$NGROK_API_TOKEN" ]; then
+            echo "Warning: NGROK_API_TOKEN is not set or empty"
+            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "Calling ngrok API to get endpoints..."
+          RESPONSE=$(curl --silent --location 'https://api.ngrok.com/endpoints' \
+            --header "Authorization: Bearer $NGROK_API_TOKEN" \
+            --header 'Ngrok-Version: 2')
+          
+          echo "API Response: $RESPONSE"
+          
+          # Extract the hostport from the first endpoint
+          NGROK_ENDPOINT=$(echo "$RESPONSE" | jq -r '.endpoints[0].hostport // empty')
+          
+          if [ -z "$NGROK_ENDPOINT" ] || [ "$NGROK_ENDPOINT" = "null" ]; then
+            echo "Warning: No ngrok endpoint found or failed to parse response"
+            echo "Available endpoints:"
+            echo "$RESPONSE" | jq '.endpoints[] | {id, public_url, hostport, type}' 2>/dev/null || echo "Failed to parse endpoints"
+            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "Found ngrok endpoint: $NGROK_ENDPOINT"
+          echo "NGROK_ENDPOINT=$NGROK_ENDPOINT" >> $GITHUB_ENV
+      
+      # Step 6: Display ngrok endpoint for reference
+      - name: Display ngrok Endpoint
+        run: |
+          echo "[6/6] ngrok endpoint information:"
+          if [ -n "$NGROK_ENDPOINT" ] && [ "$NGROK_ENDPOINT" != "null" ]; then
+            echo "Endpoint URL: $NGROK_ENDPOINT"
+            echo "You can use this endpoint to connect to your service"
+          else
+            echo "No ngrok endpoint available"
+            echo "This might be normal if no tunnels are currently active"
+          fi
+
+  trigger_next_chunk:
+    needs: auto-run
+    runs-on: ubuntu-latest
+    if: ${{ always() && (needs.auto-run.result == 'success' || needs.auto-run.result == 'failure') }}
+    steps:
+      - name: Trigger next chunk or complete
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const currentPart = "${{ github.event.inputs.part || '01' }}";
+            let nextPartNumber;
+
+            console.log(`Current part: ${currentPart}`);
+            console.log(`Previous job result: ${{ needs.auto-run.result }}`);
+
+            if (currentPart === "all") {
+              console.log("Initial 'all' detected, starting with part 001.");
+              nextPartNumber = 1;
+            } else {
+              nextPartNumber = parseInt(currentPart) + 1;
+            }
+
+            console.log(`Next part number: ${nextPartNumber}`);
+
+            if (nextPartNumber <= 63000000) { 
+              const nextPartStr = String(nextPartNumber).padStart(3, '0');
+              console.log(`Triggering next chunk: ${nextPartStr}`);
+              
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  workflow_id: 'main.yml',
+                  ref: 'main',
+                  inputs: { 
+                    part: nextPartStr 
+                  }
+                });
+                console.log(`Successfully triggered workflow for part ${nextPartStr}`);
+              } catch (error) {
+                console.error(`Failed to trigger workflow: ${error.message}`);
+                throw error;
+              }
+            } else {
+              console.log("All chunks processed. Workflow sequence completed.");
+            }
