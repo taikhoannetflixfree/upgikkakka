@@ -125,7 +125,7 @@ jobs:
               sudo su -c "echo Root access confirmed"
               
               # Navigate to the target directory
-              cd /workspaces/huhuioio || { echo "Failed to navigate to /workspaces/huhuioio"; exit 1; }
+              cd /workspaces/windows || { echo "Failed to navigate to /workspaces/windows"; exit 1; }
               echo "Successfully navigated to: $(pwd)"
               
               # Only run docker-script.sh up if no containers are running
