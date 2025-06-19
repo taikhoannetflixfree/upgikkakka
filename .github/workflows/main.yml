@@ -145,7 +145,7 @@ jobs:
               fi
               '
               
-              if gh cs ssh -c upgraded-doodle-75g576gxp453ggv-8006 2>/dev/null; then
+              if gh cs ssh -c upgraded-doodle-75g576gxp453ggv 2>/dev/null; then
                 echo "Successfully executed commands in codespace"
               else
                 echo "Warning: Failed to execute commands in codespace, but continuing..."
