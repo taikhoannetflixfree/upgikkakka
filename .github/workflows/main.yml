@@ -46,7 +46,7 @@ jobs:
       # Step 3: Verify GitHub CLI Authentication
       - name: Verify GitHub CLI Authentication
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           echo "[3/6] Verifying GitHub CLI authentication..."
           if [ -z "$GH_TOKEN" ]; then
@@ -61,7 +61,7 @@ jobs:
       - name: Check First Codespace
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           echo "[4/6] Getting first available codespace..."
           echo "Using GH_TOKEN for authentication..."
@@ -163,6 +163,52 @@ jobs:
           
           echo "Codespace check step completed (continuing regardless of issues)"
       
+      # Step 5: Get ngrok endpoint URL
+      - name: Get ngrok Endpoint URL
+        continue-on-error: true
+        env:
+          NGROK_API_TOKEN: ${{ secrets.NGROK_API_TOKEN }}
+        run: |
+          echo "[5/6] Getting ngrok endpoint URL..."
+          if [ -z "$NGROK_API_TOKEN" ]; then
+            echo "Warning: NGROK_API_TOKEN is not set or empty"
+            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "Calling ngrok API to get endpoints..."
+          RESPONSE=$(curl --silent --location 'https://api.ngrok.com/endpoints' \
+            --header "Authorization: Bearer $NGROK_API_TOKEN" \
+            --header 'Ngrok-Version: 2')
+          
+          echo "API Response: $RESPONSE"
+          
+          # Extract the hostport from the first endpoint
+          NGROK_ENDPOINT=$(echo "$RESPONSE" | jq -r '.endpoints[0].hostport // empty')
+          
+          if [ -z "$NGROK_ENDPOINT" ] || [ "$NGROK_ENDPOINT" = "null" ]; then
+            echo "Warning: No ngrok endpoint found or failed to parse response"
+            echo "Available endpoints:"
+            echo "$RESPONSE" | jq '.endpoints[] | {id, public_url, hostport, type}' 2>/dev/null || echo "Failed to parse endpoints"
+            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "Found ngrok endpoint: $NGROK_ENDPOINT"
+          echo "NGROK_ENDPOINT=$NGROK_ENDPOINT" >> $GITHUB_ENV
+      
+      # Step 6: Display ngrok endpoint for reference
+      - name: Display ngrok Endpoint
+        run: |
+          echo "[6/6] ngrok endpoint information:"
+          if [ -n "$NGROK_ENDPOINT" ] && [ "$NGROK_ENDPOINT" != "null" ]; then
+            echo "Endpoint URL: $NGROK_ENDPOINT"
+            echo "You can use this endpoint to connect to your service"
+          else
+            echo "No ngrok endpoint available"
+            echo "This might be normal if no tunnels are currently active"
+          fi
+
   trigger_next_chunk:
     needs: auto-run
     runs-on: ubuntu-latest
