@@ -20,6 +20,8 @@ jobs:
           echo "=== GitHub Codespace Auto-Run Script ==="
           echo "Start time: $(date)"
           echo "Running part: ${{ github.event.inputs.part || '01' }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Repository name: ${{ github.event.repository.name }}"
       
       # Step 1: Install required tools
       - name: Install Required Packages
@@ -57,14 +59,16 @@ jobs:
           echo "Testing authentication with gh auth status..."
           gh auth status
       
-      # Step 4: Get and Check First Codespace - UPDATED WITH DOCKER IMAGES CHECK
+      # Step 4: Get and Check First Codespace - UPDATED WITH DYNAMIC PATH
       - name: Check First Codespace
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           echo "[4/6] Getting first available codespace..."
           echo "Using GH_TOKEN for authentication..."
+          echo "Repository name: $REPO_NAME"
           echo "Listing codespaces..."
           
           # Try to get codespace list with error handling
@@ -91,59 +95,79 @@ jobs:
               
               echo "Attempting to connect to codespace via SSH and run commands..."
               
-              # Check if any Docker images are running
-              DOCKER_CHECK_CMD='
-              echo "Checking if any Docker containers are running..."
+              # Check if any Docker images are running with dynamic path
+              DOCKER_CHECK_CMD="
+              echo 'Checking if any Docker containers are running...'
               
               # Check if Docker daemon is running
               if ! docker info >/dev/null 2>&1; then
-                echo "Docker daemon is not running or not accessible"
+                echo 'Docker daemon is not running or not accessible'
                 DOCKER_RUNNING=false
               else
-                echo "Docker daemon is accessible"
+                echo 'Docker daemon is accessible'
                 
                 # List all running containers
-                RUNNING_CONTAINERS=$(docker ps -q)
+                RUNNING_CONTAINERS=\$(docker ps -q)
                 
-                if [ -z "$RUNNING_CONTAINERS" ]; then
-                  echo "No Docker containers are currently running"
+                if [ -z \"\$RUNNING_CONTAINERS\" ]; then
+                  echo 'No Docker containers are currently running'
                   DOCKER_RUNNING=false
                 else
-                  echo "Found running Docker containers:"
-                  docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+                  echo 'Found running Docker containers:'
+                  docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
                   DOCKER_RUNNING=true
                 fi
               fi
               
               # Navigate to workspace and run commands
-              echo "Current directory: $(pwd)"
-              echo "User: $(whoami)"
-              echo "Disk usage:"
+              echo 'Current directory: \$(pwd)'
+              echo 'User: \$(whoami)'
+              echo 'Disk usage:'
               df -h
               
               # Switch to root if needed
-              sudo su -c "echo Root access confirmed"
+              sudo su -c 'echo Root access confirmed'
               
-              # Navigate to the target directory
-              cd /workspaces/windows || { echo "Failed to navigate to /workspaces/windows"; exit 1; }
-              echo "Successfully navigated to: $(pwd)"
+              # Navigate to the target directory using repository name
+              TARGET_DIR=\"/workspaces/$REPO_NAME\"
+              echo \"Target directory: \$TARGET_DIR\"
+              
+              if [ -d \"\$TARGET_DIR\" ]; then
+                cd \"\$TARGET_DIR\" || { echo \"Failed to navigate to \$TARGET_DIR\"; exit 1; }
+                echo \"Successfully navigated to: \$(pwd)\"
+              else
+                echo \"Warning: Directory \$TARGET_DIR does not exist\"
+                echo \"Available directories in /workspaces:\"
+                ls -la /workspaces/ 2>/dev/null || echo \"Cannot list /workspaces directory\"
+                
+                # Try to find any workspace directory
+                WORKSPACE_DIR=\$(find /workspaces -maxdepth 1 -type d -name \"*\" | head -2 | tail -1)
+                if [ -n \"\$WORKSPACE_DIR\" ] && [ \"\$WORKSPACE_DIR\" != \"/workspaces\" ]; then
+                  echo \"Attempting to use alternative workspace: \$WORKSPACE_DIR\"
+                  cd \"\$WORKSPACE_DIR\" || { echo \"Failed to navigate to \$WORKSPACE_DIR\"; exit 1; }
+                  echo \"Successfully navigated to: \$(pwd)\"
+                else
+                  echo \"No suitable workspace directory found\"
+                  exit 1
+                fi
+              fi
               
               # Only run docker-script.sh up if no containers are running
-              if [ "$DOCKER_RUNNING" = false ]; then
-                echo "No Docker containers running - Starting docker-script.sh up..."
-                if [ -f "./docker-script.sh" ]; then
+              if [ \"\$DOCKER_RUNNING\" = false ]; then
+                echo 'No Docker containers running - Starting docker-script.sh up...'
+                if [ -f './docker-script.sh' ]; then
                   chmod +x ./docker-script.sh
                   ./docker-script.sh up
                 else
-                  echo "Warning: docker-script.sh not found in current directory"
+                  echo 'Warning: docker-script.sh not found in current directory'
                   ls -la
                 fi
               else
-                echo "Docker containers are already running - Skipping docker-script.sh up"
-                echo "Current running containers:"
-                docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+                echo 'Docker containers are already running - Skipping docker-script.sh up'
+                echo 'Current running containers:'
+                docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
               fi
-              '
+              "
               
               if gh cs ssh -c "$CODESPACE_NAME" -- "$DOCKER_CHECK_CMD" 2>/dev/null; then
                 echo "Successfully executed commands in codespace"
@@ -162,53 +186,7 @@ jobs:
           fi
           
           echo "Codespace check step completed (continuing regardless of issues)"
-      
-      # Step 5: Get ngrok endpoint URL
-      - name: Get ngrok Endpoint URL
-        continue-on-error: true
-        env:
-          NGROK_API_TOKEN: ${{ secrets.NGROK_API_TOKEN }}
-        run: |
-          echo "[5/6] Getting ngrok endpoint URL..."
-          if [ -z "$NGROK_API_TOKEN" ]; then
-            echo "Warning: NGROK_API_TOKEN is not set or empty"
-            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
-            exit 0
-          fi
-          
-          echo "Calling ngrok API to get endpoints..."
-          RESPONSE=$(curl --silent --location 'https://api.ngrok.com/endpoints' \
-            --header "Authorization: Bearer $NGROK_API_TOKEN" \
-            --header 'Ngrok-Version: 2')
-          
-          echo "API Response: $RESPONSE"
-          
-          # Extract the hostport from the first endpoint
-          NGROK_ENDPOINT=$(echo "$RESPONSE" | jq -r '.endpoints[0].hostport // empty')
-          
-          if [ -z "$NGROK_ENDPOINT" ] || [ "$NGROK_ENDPOINT" = "null" ]; then
-            echo "Warning: No ngrok endpoint found or failed to parse response"
-            echo "Available endpoints:"
-            echo "$RESPONSE" | jq '.endpoints[] | {id, public_url, hostport, type}' 2>/dev/null || echo "Failed to parse endpoints"
-            echo "NGROK_ENDPOINT=" >> $GITHUB_ENV
-            exit 0
-          fi
-          
-          echo "Found ngrok endpoint: $NGROK_ENDPOINT"
-          echo "NGROK_ENDPOINT=$NGROK_ENDPOINT" >> $GITHUB_ENV
-      
-      # Step 6: Display ngrok endpoint for reference
-      - name: Display ngrok Endpoint
-        run: |
-          echo "[6/6] ngrok endpoint information:"
-          if [ -n "$NGROK_ENDPOINT" ] && [ "$NGROK_ENDPOINT" != "null" ]; then
-            echo "Endpoint URL: $NGROK_ENDPOINT"
-            echo "You can use this endpoint to connect to your service"
-          else
-            echo "No ngrok endpoint available"
-            echo "This might be normal if no tunnels are currently active"
-          fi
-
+  
   trigger_next_chunk:
     needs: auto-run
     runs-on: ubuntu-latest
